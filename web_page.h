@@ -224,7 +224,7 @@ class HttpTransport extends EventTarget {
 const $=id=>document.getElementById(id), form=$('controls');
 let transport=null, busy=false, polling=false, lastState=null;
 function feedback(message){$('feedback').textContent=message;}
-function render(s,load=false){lastState=s;$('live').textContent=`${s.running?'RUNNING':'OUTPUTS OFF'} · ${s.mode} · ${s.reverse?'reverse':'forward'}\nElectrical: ${s.freq} Hz · Modulation: ${s.mod}%\nCarrier: ${s.actualCarrier} Hz · Dead time: ${s.dead} µs\nRun switch: ${s.runSwitch?'ON':'OFF'} · Direction switch: ${s.directionSwitch?'reverse':'forward'}\nPot: ${s.potRaw}/4095 · Local armed: ${s.localArmed}\nWi-Fi: ${s.wifiConnected?s.ip:'disconnected'}`;
+function render(s,load=false){lastState=s;$('live').textContent=`${s.running?'RUNNING':'OUTPUTS OFF'} · ${s.mode} · ${s.reverse?'reverse':'forward'}\nElectrical: ${s.freq} Hz · Modulation: ${s.mod}%\nCarrier: ${s.actualCarrier} Hz · Dead time: ${s.dead} µs\nRun switch: ${s.runSwitch?'ON':'OFF'} · Direction switch: ${s.directionSwitch?'reverse':'forward'}\nInput voltages: run ${s.runVoltage} V · direction ${s.directionVoltage} V · pot ${s.potVoltage} V\nPot: ${s.potRaw}/4095 · Local armed: ${s.localArmed}\nWi-Fi: ${s.wifiConnected?s.ip:'disconnected'}`;
 if(load){for(const key of ['freq','mod','carrier','dead','ton','toff'])form.elements[key].value=s[key];form.elements.run.checked=s.running;form.elements.reverse.checked=s.reverse;$('source').value=s.mode;}
 form.querySelector('fieldset').disabled=s.mode==='local';}
 async function request(path,params={}){if(!transport)throw Error('Connect first.');return transport.request(path,params);}

@@ -20,6 +20,8 @@ uint32_t millis(){return clockMs;}
 void pinMode(int,int){}
 int digitalRead(int p){return levels[p];}
 int analogRead(int){return adc;}
+uint32_t analogReadMilliVolts(int p){return p==POT_PIN ? 2200 : (levels[p] ? 3100 : 0);}
+uint32_t runMilliVolts=0, directionMilliVolts=0, potMilliVolts=0;
 bool localMode=false, running=false, reverseDirection=false, localArmed=false;
 float electricalHz=50, modulationPercent=10;
 uint16_t potRaw=0;
@@ -34,6 +36,7 @@ int main(){
     levels[RUN_PIN]=0; levels[DIRECTION_PIN]=1;
     runInput.begin(); directionInput.begin();
     for(int i=0;i<60;i++)tick();
+    assert(runMilliVolts==0 && directionMilliVolts==3100 && potMilliVolts==2200);
     localMode=true; tick(); assert(!running && !localArmed);
     change(RUN_PIN,false); assert(localArmed && !running);
     change(RUN_PIN,true); assert(running && !localArmed);

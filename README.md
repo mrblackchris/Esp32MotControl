@@ -30,6 +30,14 @@ You can also open `motor-control.html` in a Web Serial capable browser (Chrome/C
 
 Frequency and modulation are independent open-loop commands. There is no automatic induction-motor V/f profile, acceleration/deceleration ramp, current regulation, rotor-speed measurement or hardware fault input. Status reports commanded settings and gate-output enable state, rather than measured motor operation. Those functions and hardware waveform verification remain necessary work before operating a power stage with a motor.
 
+## Input voltage monitoring
+
+`/state` includes `runVoltage`, `directionVoltage` and `potVoltage` in volts, sampled every 10 ms using the calibrated ADC API. The browser displays these alongside the input states. ADC attenuation is explicitly set to 11 dB on GPIO32/33/34. Values near the rails can saturate; the classic ESP32's documented measurable range at this attenuation is approximately 0.15–3.1 V. These are ADC estimates, not an overvoltage measurement.
+
+Automatic connection detection is pending a defined wiring scheme and voltage windows. With the current switch-to-GND wiring, an open switch is electrically indistinguishable from an unplugged switch. An unplugged potentiometer on GPIO34 can float. Voltage readings alone do not establish that an input is connected. The existing explicit Local/Remote selection remains in effect until this is resolved.
+
+See [Espressif ADC documentation](https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html) and [GPIO restrictions](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gpio.html).
+
 ## Shared HTTP / serial API
 
 HTTP: `GET /state`; form-encoded `POST /set`, `/mode`, `/stop`.

@@ -93,6 +93,9 @@ constexpr int RUN_PIN = 32, DIRECTION_PIN = 33, POT_PIN = 34;
 constexpr float LOCAL_MAX_HZ = 50.0f;
 bool localMode = false, reverseDirection = false, localArmed = false;
 uint16_t potRaw = 0;
+// Calibrated ADC readings are available even when a voltage is outside a
+// future presence/state window. GPIO32/33/34 all belong to ADC1.
+uint32_t runMilliVolts = 0, directionMilliVolts = 0, potMilliVolts = 0;
 struct DebouncedInput {
     int pin;
     bool raw = false, active = false;
@@ -279,6 +282,9 @@ String stateJson() {
     out += ",\"directionSwitch\":" + String(directionInput.active ? "true" : "false");
     out += ",\"localArmed\":" + String(localArmed ? "true" : "false");
     out += ",\"potRaw\":" + String(potRaw);
+    out += ",\"runVoltage\":" + String(runMilliVolts / 1000.0f, 3);
+    out += ",\"directionVoltage\":" + String(directionMilliVolts / 1000.0f, 3);
+    out += ",\"potVoltage\":" + String(potMilliVolts / 1000.0f, 3);
     out += ",\"localMaxHz\":" + String(LOCAL_MAX_HZ, 1);
     out += ",\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
     out += ",\"ip\":" + jsonString(WiFi.localIP().toString()) + "}";
@@ -309,6 +315,9 @@ void serviceInputs() {
     static float filtered = 0;
     if (uint32_t(millis() - lastSample) >= 10) {
         lastSample = millis();
+        runMilliVolts = analogReadMilliVolts(RUN_PIN);
+        directionMilliVolts = analogReadMilliVolts(DIRECTION_PIN);
+        potMilliVolts = analogReadMilliVolts(POT_PIN);
         filtered += (analogRead(POT_PIN) - filtered) * 0.125f;
         potRaw = lroundf(filtered);
     }
@@ -493,6 +502,9 @@ void setup() {
     setupPulse();
     runInput.begin(); directionInput.begin();
     analogReadResolution(12);
+    analogSetPinAttenuation(RUN_PIN, ADC_11db);
+    analogSetPinAttenuation(DIRECTION_PIN, ADC_11db);
+    analogSetPinAttenuation(POT_PIN, ADC_11db);
     pinMode(POT_PIN, INPUT);
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
