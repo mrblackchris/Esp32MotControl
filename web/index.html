@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Motor Control</title>
+<style>body{font:16px system-ui;background:#eef2f7;color:#192638;max-width:850px;margin:auto;padding:24px}section,fieldset{background:white;border:1px solid #ccd4df;border-radius:10px;padding:20px;margin:16px 0}label{display:flex;justify-content:space-between;gap:16px;margin:14px 0}input,select,button{padding:8px}input[type=number]{width:130px}button{cursor:pointer;margin:4px}#stop{background:#ad2435;color:white}pre{white-space:pre-wrap}small{line-height:1.5}#feedback{min-height:2em}</style></head><body>
+<h1>ESP32 Motor Control</h1>
+<section><button id="usb">Connect USB serial</button><button id="wifi">Connect Wi-Fi</button><input id="address" placeholder="http://192.168.1.50"><button id="stop">Stop motor</button><p id="feedback" role="status">Connect to read device state.</p></section>
+<section><h2>Applied status</h2><pre id="live">Disconnected</pre><label>Control source<select id="source"><option value="remote">Remote (Wi-Fi / serial)</option><option value="local">Local (switches / potentiometer)</option></select></label><button id="mode">Apply control source · stops motor</button></section>
+<form id="controls"><fieldset><legend>Remote settings</legend>
+<label>Electrical frequency (Hz)<input name="freq" type="number" min="0" max="1500" step="any" required></label>
+<label>Modulation (%)<input name="mod" type="number" min="0" max="100" step="any" required></label>
+<label>Carrier (Hz)<input name="carrier" type="number" min="5000" max="20000" step="1" required></label>
+<label>Dead time (µs)<input name="dead" type="number" min="0.1" max="5" step="any" required></label>
+<label>Reverse phase sequence<input name="reverse" type="checkbox"></label>
+<label>Enable motor outputs<input name="run" type="checkbox"></label>
+<label>GPIO25 pulse on-time (µs)<input name="ton" type="number" min="1" max="30000" step="1" required></label>
+<label>GPIO25 pulse off-time (µs)<input name="toff" type="number" min="1" max="30000" step="1" required></label>
+<button type="submit">Apply remote settings</button><button type="button" id="reload">Read settings into form</button>
+</fieldset></form>
+<section><h2>Local controls</h2><p>Run switch: GPIO32 to GND. Direction switch: GPIO33 to GND (closed = reverse). Potentiometer: ends to 3.3 V and GND, wiper to GPIO34. Range: 0–50 electrical Hz.</p><p>After selecting Local or issuing Stop, switch OFF then ON to start. Direction changes while running stop the outputs and require OFF then ON. If zero frequency stops the motor, cycle the run switch to restart.</p><small>Modulation remains at the applied setting in Local mode. This is open-loop waveform control with independent frequency and modulation, without a V/f profile, acceleration ramp, current feedback or speed measurement. Stop disables the six motor gate signals; GPIO25 continues independently.</small>
+<p>U: GPIO18 / 19 · V: GPIO21 / 22 · W: GPIO23 / 26 (high / low).</p></section>
+<script>
+/*TRANSPORT*/
+const $=id=>document.getElementById(id), form=$('controls');
+let transport=null, busy=false, polling=false, lastState=null;
+function feedback(message){$('feedback').textContent=message;}
+function render(s,load=false){lastState=s;$('live').textContent=`${s.running?'RUNNING':'OUTPUTS OFF'} · ${s.mode} · ${s.reverse?'reverse':'forward'}\nElectrical: ${s.freq} Hz · Modulation: ${s.mod}%\nCarrier: ${s.actualCarrier} Hz · Dead time: ${s.dead} µs\nRun switch: ${s.runSwitch?'ON':'OFF'} · Direction switch: ${s.directionSwitch?'reverse':'forward'}\nPot: ${s.potRaw}/4095 · Local armed: ${s.localArmed}\nWi-Fi: ${s.wifiConnected?s.ip:'disconnected'}`;
+if(load){for(const key of ['freq','mod','carrier','dead','ton','toff'])form.elements[key].value=s[key];form.elements.run.checked=s.running;form.elements.reverse.checked=s.reverse;$('source').value=s.mode;}
+form.querySelector('fieldset').disabled=s.mode==='local';}
+async function request(path,params={}){if(!transport)throw Error('Connect first.');return transport.request(path,params);}
+async function action(path,params={},load=false){if((busy||polling)&&path!=='/stop')return;busy=true;try{render(await request(path,params),load);if(path==='/stop')form.elements.run.checked=false;feedback('Confirmed by ESP32.');}catch(e){feedback('Action not confirmed: '+e.message);}finally{busy=false;}}
+async function connectUSB(){if(transport){await transport.close?.();transport=null;}try{const t=new SerialTransport();await t.open(await navigator.serial.requestPort());transport=t;t.addEventListener('disconnect',()=>feedback('USB disconnected. Output state unknown.'));let s;for(let i=0;i<4;i++){try{s=await request('/state');break;}catch(e){if(i===3)throw e;}}render(s,true);feedback('USB connected.');}catch(e){await transport?.close?.();transport=null;feedback(e.message);}}
+async function connectWifi(){await transport?.close?.();transport=null;try{const t=new HttpTransport();await t.open($('address').value||location.origin);transport=t;render(await request('/state'),true);feedback('Wi-Fi connected.');}catch(e){transport=null;feedback(e.message);}}
+$('usb').disabled=!window.isSecureContext||!('serial'in navigator);$('usb').onclick=()=>{if(!busy&&!polling)connectUSB();};$('wifi').onclick=()=>{if(!busy&&!polling)connectWifi();};
+$('stop').onclick=()=>action('/stop');$('mode').onclick=()=>action('/mode',{mode:$('source').value},true);$('reload').onclick=()=>action('/state',{},true);
+form.onsubmit=e=>{e.preventDefault();const p=Object.fromEntries(new FormData(form));p.run=form.elements.run.checked?'1':'0';p.reverse=form.elements.reverse.checked?'1':'0';action('/set',p);};
+setInterval(async()=>{if(!transport||busy||polling)return;polling=true;try{render(await request('/state'));}catch(e){$('live').textContent='Status unavailable. Output state unknown.';feedback(e.message);}finally{polling=false;}},1000);
+if(location.protocol==='http:'){$('address').value=location.origin;connectWifi();}
+</script></body></html>

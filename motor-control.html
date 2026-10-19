@@ -1,0 +1,237 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Motor Control</title>
+<style>body{font:16px system-ui;background:#eef2f7;color:#192638;max-width:850px;margin:auto;padding:24px}section,fieldset{background:white;border:1px solid #ccd4df;border-radius:10px;padding:20px;margin:16px 0}label{display:flex;justify-content:space-between;gap:16px;margin:14px 0}input,select,button{padding:8px}input[type=number]{width:130px}button{cursor:pointer;margin:4px}#stop{background:#ad2435;color:white}pre{white-space:pre-wrap}small{line-height:1.5}#feedback{min-height:2em}</style></head><body>
+<h1>ESP32 Motor Control</h1>
+<section><button id="usb">Connect USB serial</button><button id="wifi">Connect Wi-Fi</button><input id="address" placeholder="http://192.168.1.50"><button id="stop">Stop motor</button><p id="feedback" role="status">Connect to read device state.</p></section>
+<section><h2>Applied status</h2><pre id="live">Disconnected</pre><label>Control source<select id="source"><option value="remote">Remote (Wi-Fi / serial)</option><option value="local">Local (switches / potentiometer)</option></select></label><button id="mode">Apply control source · stops motor</button></section>
+<form id="controls"><fieldset><legend>Remote settings</legend>
+<label>Electrical frequency (Hz)<input name="freq" type="number" min="0" max="1500" step="any" required></label>
+<label>Modulation (%)<input name="mod" type="number" min="0" max="100" step="any" required></label>
+<label>Carrier (Hz)<input name="carrier" type="number" min="5000" max="20000" step="1" required></label>
+<label>Dead time (µs)<input name="dead" type="number" min="0.1" max="5" step="any" required></label>
+<label>Reverse phase sequence<input name="reverse" type="checkbox"></label>
+<label>Enable motor outputs<input name="run" type="checkbox"></label>
+<label>GPIO25 pulse on-time (µs)<input name="ton" type="number" min="1" max="30000" step="1" required></label>
+<label>GPIO25 pulse off-time (µs)<input name="toff" type="number" min="1" max="30000" step="1" required></label>
+<button type="submit">Apply remote settings</button><button type="button" id="reload">Read settings into form</button>
+</fieldset></form>
+<section><h2>Local controls</h2><p>Run switch: GPIO32 to GND. Direction switch: GPIO33 to GND (closed = reverse). Potentiometer: ends to 3.3 V and GND, wiper to GPIO34. Range: 0–50 electrical Hz.</p><p>After selecting Local or issuing Stop, switch OFF then ON to start. Direction changes while running stop the outputs and require OFF then ON. If zero frequency stops the motor, cycle the run switch to restart.</p><small>Modulation remains at the applied setting in Local mode. This is open-loop waveform control with independent frequency and modulation, without a V/f profile, acceleration ramp, current feedback or speed measurement. Stop disables the six motor gate signals; GPIO25 continues independently.</small>
+<p>U: GPIO18 / 19 · V: GPIO21 / 22 · W: GPIO23 / 26 (high / low).</p></section>
+<script>
+// Direct browser USB transport for the existing MC newline/JSON protocol.
+class SerialTransport extends EventTarget {
+  constructor() {
+    super();
+    this.port = null;
+    this.reader = null;
+    this.writer = null;
+    this.active = null;
+    this.queue = [];
+    this.sequence = crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
+    this.closing = false;
+  }
+
+  get connected() { return !!this.port && !this.closing; }
+
+  async open(port) {
+    if (this.port) throw new Error('A USB connection is already open.');
+    this.closing = false;
+    try {
+      await port.open({baudRate: 115200, bufferSize: 4096, flowControl: 'none'});
+      this.port = port;
+      // ESP32 USB adapters can reset on open. Initial read-only handshake retries handle boot.
+      await port.setSignals({dataTerminalReady: false, requestToSend: false});
+      this.writer = port.writable.getWriter();
+      this.readTask = this.readLoop(port);
+    } catch (error) {
+      if (this.port) await this.close();
+      throw error;
+    }
+  }
+
+  request(path, params = {}, timeout = 6000) {
+    if (!this.connected) return Promise.reject(new Error('USB is not connected.'));
+    return new Promise((resolve, reject) => {
+      if (path === '/stop') {
+        // Do not allow an older queued Apply to enable an output after Stop.
+        const keep = [];
+        for (const item of this.queue) {
+          if (['/set', '/mode'].includes(item.path)) {
+            item.reject(new Error('Queued action cancelled by Stop.'));
+          } else keep.push(item);
+        }
+        this.queue = keep;
+      }
+      const item = {path, params, timeout, resolve, reject};
+      if (path === '/stop') this.queue.unshift(item);
+      else this.queue.push(item);
+      this.pump();
+    });
+  }
+
+  pump() {
+    if (this.active || !this.queue.length || !this.connected) return;
+    const item = this.queue.shift();
+    this.sequence = this.sequence % 999999999 + 1;
+    const query = new URLSearchParams(item.params).toString();
+    const command = new TextEncoder().encode(`MC ${this.sequence} ${item.path}${query ? '?' + query : ''}\n`);
+    if (command.byteLength > 1537) {
+      item.reject(new Error('Command exceeds the firmware limit of 1536 bytes.'));
+      this.pump(); return;
+    }
+    item.id = this.sequence;
+    this.active = item;
+    item.timer = setTimeout(() => {
+      this.finish(item, new Error('USB request timed out. The command may have been applied; check device status before retrying.'));
+    }, item.timeout);
+    this.writer.write(command).catch(error => this.finish(item, error));
+  }
+
+  finish(item, error, data) {
+    if (this.active !== item) return;
+    clearTimeout(item.timer);
+    this.active = null;
+    if (error) item.reject(error);
+    else item.resolve(data);
+    this.pump();
+  }
+
+  async readLoop(port) {
+    let buffer = '';
+    const decoder = new TextDecoder();
+    try {
+      this.reader = port.readable.getReader();
+      while (!this.closing) {
+        const {value, done} = await this.reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline).trimEnd();
+          buffer = buffer.slice(newline + 1);
+          if (!line.startsWith('MC ')) continue;
+          let reply;
+          try { reply = JSON.parse(line.slice(3)); } catch { continue; }
+          const item = this.active;
+          if (!item || reply?.id !== item.id) continue; // Ignore stale replies and boot messages.
+          if (reply.code !== 200) this.finish(item, new Error(String(reply.data || 'Command rejected.')));
+          else if (!Object.hasOwn(reply, 'data')) this.finish(item, new Error('Incomplete firmware response.'));
+          else this.finish(item, null, reply.data);
+        }
+        if (buffer.length > 16384) buffer = '';
+      }
+    } catch (error) {
+      if (!this.closing) this.readError = error;
+    } finally {
+      this.reader?.releaseLock();
+      this.reader = null;
+      if (!this.closing) {
+        this.dispatchEvent(new Event('disconnect'));
+        // Run cleanup after this read task resolves to avoid waiting on itself.
+        queueMicrotask(() => this.close());
+      }
+    }
+  }
+
+  async close() {
+    if (this.closing) return this.closeTask;
+    this.closing = true;
+    this.closeTask = this.cleanup();
+    return this.closeTask;
+  }
+
+  async cleanup() {
+    const error = new Error('USB disconnected. An in-flight command may have been applied.');
+    if (this.active) this.finish(this.active, error);
+    for (const item of this.queue.splice(0)) item.reject(error);
+    try { await this.reader?.cancel(); } catch { /* Cable may already be disconnected. */ }
+    try { await this.readTask; } catch { /* Reported by readLoop. */ }
+    this.writer?.releaseLock();
+    this.writer = null;
+    try { await this.port?.close(); } catch { /* Device may already be closed. */ }
+    this.port = null;
+  }
+}
+
+// HTTP over TCP/IP. Same request(path, params) contract as SerialTransport.
+class HttpTransport extends EventTarget {
+  constructor() {
+    super();
+    this.address = null;
+    this.queue = [];
+    this.active = null;
+  }
+  get connected() { return this.address !== null; }
+  async open(address) {
+    const url = new URL(address.includes('://') ? address : 'http://' + address);
+    if (url.protocol !== 'http:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
+      throw new Error('Enter an HTTP device address, for example http://192.168.1.50');
+    this.address = url.origin;
+  }
+  request(path, params = {}, timeout = 6000) {
+    if (!this.connected) return Promise.reject(new Error('HTTP is disconnected.'));
+    if (!['/state', '/set', '/stop', '/mode'].includes(path))
+      return Promise.reject(new Error('Unknown command path.'));
+    return new Promise((resolve, reject) => {
+      if (path === '/stop') {
+        const keep = [];
+        for (const item of this.queue) {
+          if (['/set', '/mode'].includes(item.path)) item.reject(new Error('Queued action cancelled by Stop.'));
+          else keep.push(item);
+        }
+        this.queue = keep;
+      }
+      const item = {path, params, timeout, resolve, reject};
+      if (path === '/stop') this.queue.unshift(item);
+      else this.queue.push(item);
+      this.pump();
+    });
+  }
+  async pump() {
+    if (this.active || !this.queue.length || !this.connected) return;
+    const item = this.queue.shift();
+    this.active = item;
+    item.controller = new AbortController();
+    const timer = setTimeout(() => item.controller.abort(), item.timeout);
+    try {
+      const reading = ['/state'].includes(item.path);
+      const response = await fetch(this.address + item.path, {
+        method: reading ? 'GET' : 'POST',
+        body: reading ? undefined : new URLSearchParams(item.params),
+        cache: 'no-store', signal: item.controller.signal,
+      });
+      const body = await response.text();
+      if (!response.ok) throw new Error(body || 'HTTP ' + response.status);
+      if (!this.connected || item.controller.signal.aborted) throw new Error('Connection closed.');
+      item.resolve(JSON.parse(body));
+    } catch (error) {
+      item.reject(new Error(error.name === 'AbortError' || error instanceof TypeError ?
+        'HTTP action not confirmed. It may have been applied; check state before retrying. Check address and browser local-network permissions.' : error.message));
+    } finally {
+      clearTimeout(timer);
+      this.active = null;
+      this.pump();
+    }
+  }
+  async close() {
+    this.address = null;
+    this.active?.controller.abort();
+    for (const item of this.queue.splice(0)) item.reject(new Error('HTTP disconnected.'));
+  }
+}
+
+const $=id=>document.getElementById(id), form=$('controls');
+let transport=null, busy=false, polling=false, lastState=null;
+function feedback(message){$('feedback').textContent=message;}
+function render(s,load=false){lastState=s;$('live').textContent=`${s.running?'RUNNING':'OUTPUTS OFF'} · ${s.mode} · ${s.reverse?'reverse':'forward'}\nElectrical: ${s.freq} Hz · Modulation: ${s.mod}%\nCarrier: ${s.actualCarrier} Hz · Dead time: ${s.dead} µs\nRun switch: ${s.runSwitch?'ON':'OFF'} · Direction switch: ${s.directionSwitch?'reverse':'forward'}\nPot: ${s.potRaw}/4095 · Local armed: ${s.localArmed}\nWi-Fi: ${s.wifiConnected?s.ip:'disconnected'}`;
+if(load){for(const key of ['freq','mod','carrier','dead','ton','toff'])form.elements[key].value=s[key];form.elements.run.checked=s.running;form.elements.reverse.checked=s.reverse;$('source').value=s.mode;}
+form.querySelector('fieldset').disabled=s.mode==='local';}
+async function request(path,params={}){if(!transport)throw Error('Connect first.');return transport.request(path,params);}
+async function action(path,params={},load=false){if((busy||polling)&&path!=='/stop')return;busy=true;try{render(await request(path,params),load);if(path==='/stop')form.elements.run.checked=false;feedback('Confirmed by ESP32.');}catch(e){feedback('Action not confirmed: '+e.message);}finally{busy=false;}}
+async function connectUSB(){if(transport){await transport.close?.();transport=null;}try{const t=new SerialTransport();await t.open(await navigator.serial.requestPort());transport=t;t.addEventListener('disconnect',()=>feedback('USB disconnected. Output state unknown.'));let s;for(let i=0;i<4;i++){try{s=await request('/state');break;}catch(e){if(i===3)throw e;}}render(s,true);feedback('USB connected.');}catch(e){await transport?.close?.();transport=null;feedback(e.message);}}
+async function connectWifi(){await transport?.close?.();transport=null;try{const t=new HttpTransport();await t.open($('address').value||location.origin);transport=t;render(await request('/state'),true);feedback('Wi-Fi connected.');}catch(e){transport=null;feedback(e.message);}}
+$('usb').disabled=!window.isSecureContext||!('serial'in navigator);$('usb').onclick=()=>{if(!busy&&!polling)connectUSB();};$('wifi').onclick=()=>{if(!busy&&!polling)connectWifi();};
+$('stop').onclick=()=>action('/stop');$('mode').onclick=()=>action('/mode',{mode:$('source').value},true);$('reload').onclick=()=>action('/state',{},true);
+form.onsubmit=e=>{e.preventDefault();const p=Object.fromEntries(new FormData(form));p.run=form.elements.run.checked?'1':'0';p.reverse=form.elements.reverse.checked?'1':'0';action('/set',p);};
+setInterval(async()=>{if(!transport||busy||polling)return;polling=true;try{render(await request('/state'));}catch(e){$('live').textContent='Status unavailable. Output state unknown.';feedback(e.message);}finally{polling=false;}},1000);
+if(location.protocol==='http:'){$('address').value=location.origin;connectWifi();}
+</script></body></html>

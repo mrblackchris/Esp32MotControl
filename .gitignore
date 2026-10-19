@@ -1,0 +1,7 @@
+# Local Wi-Fi credentials
+wifi_config.h
+
+# Build and Python artifacts
+build/
+__pycache__/
+*.pyc
